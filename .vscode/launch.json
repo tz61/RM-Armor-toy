@@ -13,18 +13,18 @@
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",
-            "miDebuggerPath": "D:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-arm-none-eabi/bin/arm-none-eabi-gdb.exe",
-            "miDebuggerServerAddress": "localhost:14566",
+            "miDebuggerPath": "arm-none-eabi-gdb",
+            // "miDebuggerPath": "D:/Program Files (x86)/Arm/GNU Toolchain mingw-w64-i686-arm-none-eabi/bin/arm-none-eabi-gdb.exe",
             "setupCommands": [
+                {
+                    "description": "Conn",
+                    "text": "target extended-remote localhost:14566",
+                    "ignoreFailures": false
+                },
                 {
                     "description": "Reset and Halt",
                     "text": "monitor reset halt",
-                    "ignoreFailures": true
-                },
-                {
-                    "description": "Halt the processor",
-                    "text": "monitor halt",
-                    "ignoreFailures": true
+                    "ignoreFailures": false
                 }
             ],
             "logging": {

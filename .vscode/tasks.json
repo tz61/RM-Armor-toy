@@ -23,7 +23,8 @@
             "type": "process",
             "isBackground": true,
             "dependsOn": "CMake Build",
-            "command": "D:/OpenOCD/xpack-openocd-0.12.0-7/bin/openocd.exe",
+            "command": "openocd",
+            // "command": "D:/OpenOCD/xpack-openocd-0.12.0-7/bin/openocd.exe",
             "args": [
                 "-f",
                 "cmsis-dap-l0.cfg",
