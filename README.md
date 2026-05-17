@@ -1,0 +1,1 @@
+D:\OpenOCD\xpack-openocd-0.12.0-7\bin\openocd.exe -f cmsis-dap-l0.cfg -c "program build/Debug/CUBEMX-ARMOR-TOY-STM32L051.elf; reset; halt; exit"
