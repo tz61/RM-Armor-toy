@@ -97,11 +97,22 @@ static void MX_SPI1_Init(void);
 #define BUZZER_BEEP_OFF_MS 35U
 #define BUZZER_MAX_BEEPS 8U
 
-#define MODE3_TAP_EFFECT_MS 1200U
-#define MODE3_TAP_BLINK_MS 80U
-#define FANCY_FRAME_MS 35U
-#define STATIC_FRAME_MS 80U
-#define SEDENTARY_FRAME_MS 120U
+#define MODE3_TAP_EFFECT_MS 500U
+#define MODE3_TAP_BLINK_MS 30U
+#define FANCY_FRAME_MS 10U
+#define STATIC_FRAME_MS 10U
+#define SEDENTARY_FRAME_MS 10U
+
+#define FANCY_ROWS 8U
+#define FANCY_STAGE_FLOW_FRAMES 260UL
+#define FANCY_STAGE_BULLET_FRAMES 230UL
+#define FANCY_STAGE_PORTAL_FRAMES 240UL
+#define FANCY_STAGE_HEART_FRAMES 220UL
+#define FANCY_STAGE_GLITTER_FRAMES 220UL
+#define FANCY_STAGE_TOTAL_FRAMES                                             \
+  (FANCY_STAGE_FLOW_FRAMES + FANCY_STAGE_BULLET_FRAMES +                     \
+   FANCY_STAGE_PORTAL_FRAMES + FANCY_STAGE_HEART_FRAMES +                    \
+   FANCY_STAGE_GLITTER_FRAMES)
 
 #define SEDENTARY_TOTAL_SECONDS (48UL * 60UL)
 #define SEDENTARY_LED_SECONDS (SEDENTARY_TOTAL_SECONDS / SK6812_LED_COUNT)
@@ -236,7 +247,7 @@ static void Buzzer_Task(uint32_t now) {
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
   uint32_t now = HAL_GetTick();
 
-  if (GPIO_Pin == CHG_MODE_Pin) {
+  if (GPIO_Pin == RST_COUNTER_Pin) {
     if ((last_chg_irq_ms == 0U) ||
         TimeElapsed(now, last_chg_irq_ms, KEY_DEBOUNCE_MS)) {
       last_chg_irq_ms = now;
@@ -339,16 +350,6 @@ static uint8_t Scale8(uint8_t value, uint8_t scale) {
   return (uint8_t)(((uint16_t)value * (uint16_t)scale) / 255U);
 }
 
-static uint8_t CircularDistance(uint8_t a, uint8_t b) {
-  uint8_t diff = (a > b) ? (uint8_t)(a - b) : (uint8_t)(b - a);
-
-  if (diff > (SK6812_LED_COUNT / 2U)) {
-    diff = (uint8_t)(SK6812_LED_COUNT - diff);
-  }
-
-  return diff;
-}
-
 static void ColorWheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b) {
   pos = (uint8_t)(255U - pos);
 
@@ -383,7 +384,168 @@ static uint8_t BreathLevel(uint32_t now) {
   return (uint8_t)(1U + ((phase * (LED_MAX_LUMINANCE - 1U)) / 1100U));
 }
 
-static void RenderModeRed(void) {
+static uint8_t FancyLedAt(uint8_t row, uint8_t right_side) {
+  if (right_side) {
+    return (uint8_t)(SK6812_LED_COUNT - row);
+  }
+
+  return (uint8_t)(row + 1U);
+}
+
+static void FancySetPixel(uint8_t row, uint8_t right_side, uint8_t r,
+                          uint8_t g, uint8_t b) {
+  if (row >= FANCY_ROWS) {
+    return;
+  }
+
+  SK6812_SetRGB(FancyLedAt(row, right_side), r, g, b);
+}
+
+static void FancySetRow(uint8_t row, uint8_t r, uint8_t g, uint8_t b) {
+  FancySetPixel(row, 0U, r, g, b);
+  FancySetPixel(row, 1U, r, g, b);
+}
+
+static uint8_t AbsDiffU8(uint8_t a, uint8_t b) {
+  return (a > b) ? (uint8_t)(a - b) : (uint8_t)(b - a);
+}
+
+static uint8_t FancyNoise8(uint8_t seed, uint32_t tick) {
+  uint32_t x = tick + ((uint32_t)seed * 0x45d9f3bUL) + 0x9e3779b9UL;
+
+  x ^= x >> 16U;
+  x *= 0x7feb352dUL;
+  x ^= x >> 15U;
+
+  return (uint8_t)(x >> 24U);
+}
+
+static void FancyRenderFlow(uint32_t t) {
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t shimmer;
+
+    ColorWheel((uint8_t)((t * 2U) + ((uint32_t)row * 24U)), &r, &g, &b);
+    shimmer = (uint8_t)(170U + (Triangle8((uint8_t)((t * 5U) +
+                                                    ((uint32_t)row * 28U))) >>
+                                2U));
+    FancySetPixel(row, 0U, Scale8(r, shimmer), Scale8(g, shimmer),
+                  Scale8(b, shimmer));
+
+    ColorWheel((uint8_t)((t * 2U) + ((uint32_t)(FANCY_ROWS - 1U - row) * 24U) +
+                         80U),
+               &r, &g, &b);
+    shimmer = (uint8_t)(170U + (Triangle8((uint8_t)((t * 5U) +
+                                                    ((uint32_t)row * 31U))) >>
+                                2U));
+    FancySetPixel(row, 1U, Scale8(r, shimmer), Scale8(g, shimmer),
+                  Scale8(b, shimmer));
+  }
+}
+
+static void FancyRenderBullets(uint32_t t) {
+  uint8_t shot = (uint8_t)((t / 10U) % (FANCY_ROWS + 4U));
+
+  SK6812_SetAllRGB(0U, 0U, 6U);
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t distance = AbsDiffU8(row, shot);
+
+    if (distance < 4U) {
+      uint8_t level = (uint8_t)(LED_SOLID_LEVEL - ((uint16_t)distance * 30U));
+      FancySetPixel(row, 0U, level, (uint8_t)(level >> 2U), 0U);
+    }
+
+    if ((shot >= 1U) && (shot < (FANCY_ROWS + 1U))) {
+      uint8_t hit_row = (uint8_t)(shot - 1U);
+      uint8_t hit_distance = AbsDiffU8(row, hit_row);
+
+      if (hit_distance < 3U) {
+        uint8_t burst = (uint8_t)(LED_SOLID_LEVEL -
+                                  ((uint16_t)hit_distance * 38U));
+        FancySetPixel(row, 1U, burst, burst, (uint8_t)(burst >> 3U));
+      }
+    }
+  }
+}
+
+static void FancyRenderPortal(uint32_t t) {
+  uint8_t radius = (uint8_t)((t / 11U) % 9U);
+  uint8_t hue = (uint8_t)(t * 3U);
+
+  SK6812_SetAllRGB(0U, 0U, 0U);
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t d0 = AbsDiffU8(row, 3U);
+    uint8_t d1 = AbsDiffU8(row, 4U);
+    uint8_t distance = (d0 < d1) ? d0 : d1;
+
+    if (distance <= radius) {
+      uint8_t edge = AbsDiffU8(distance, radius);
+      uint8_t level = (edge == 0U) ? LED_SOLID_LEVEL : 42U;
+
+      ColorWheel((uint8_t)(hue + ((uint32_t)row * 18U)), &r, &g, &b);
+      r = Scale8(r, (uint8_t)(level * 2U));
+      g = Scale8(g, (uint8_t)(level * 2U));
+      b = Scale8(b, (uint8_t)(level * 2U));
+      FancySetRow(row, r, g, b);
+    }
+  }
+}
+
+static void FancyRenderHeart(uint32_t t) {
+  uint8_t beat = Triangle8((uint8_t)(t * 4U));
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t shape = (uint8_t)(LED_SOLID_LEVEL -
+                              ((uint16_t)row * (LED_SOLID_LEVEL / 9U)));
+    uint8_t glow = ClampAddLed(Scale8(shape, (uint8_t)(130U + (beat >> 1U))),
+                               (uint8_t)(beat >> 3U));
+
+    FancySetRow(row, glow, (uint8_t)(glow >> 4U), (uint8_t)(glow >> 2U));
+  }
+}
+
+static void FancyRenderGlitter(uint32_t t) {
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t base = (uint8_t)(18U + (Triangle8((uint8_t)(t * 2U + row * 21U)) >>
+                                    4U));
+
+    ColorWheel((uint8_t)(t + row * 29U), &r, &g, &b);
+    FancySetRow(row, Scale8(r, base), Scale8(g, base), Scale8(b, base));
+
+    for (uint8_t side = 0U; side < 2U; side++) {
+      uint8_t noise = FancyNoise8((uint8_t)(row + (side * 13U)), t / 3U);
+
+      if (noise > 232U) {
+        FancySetPixel(row, side, LED_SOLID_LEVEL, LED_SOLID_LEVEL,
+                      LED_SOLID_LEVEL);
+      } else if (noise > 216U) {
+        FancySetPixel(row, side, LED_SOLID_LEVEL, 0U, LED_SOLID_LEVEL);
+      }
+    }
+  }
+}
+
+static void RenderModeRed(uint32_t now) {
+  if (tap_effect_active) {
+    uint32_t age = now - tap_effect_started_ms;
+
+    if (age >= MODE3_TAP_EFFECT_MS) {
+      tap_effect_active = 0U;
+    } else if (((age / MODE3_TAP_BLINK_MS) & 1UL) == 0UL) {
+      SK6812_SetAllRGB(0U, 0U, 0U);
+      return;
+    }
+  }
   SK6812_SetAllRGB(LED_SOLID_LEVEL, 0U, 0U);
 }
 
@@ -403,37 +565,34 @@ static void RenderModeBlue(uint32_t now) {
 }
 
 static void RenderModeFancy(void) {
-  uint8_t comet = (uint8_t)((mode3_phase >> 3U) % SK6812_LED_COUNT);
+  uint32_t stage_time = mode3_phase % FANCY_STAGE_TOTAL_FRAMES;
 
-  for (uint8_t i = 0U; i < SK6812_LED_COUNT; i++) {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-    uint8_t shimmer;
-    uint8_t distance;
+  if (stage_time < FANCY_STAGE_FLOW_FRAMES) {
+    FancyRenderFlow(stage_time);
+  } else {
+    stage_time -= FANCY_STAGE_FLOW_FRAMES;
 
-    ColorWheel((uint8_t)(mode3_phase + ((uint32_t)i * 16U)), &r, &g, &b);
+    if (stage_time < FANCY_STAGE_BULLET_FRAMES) {
+      FancyRenderBullets(stage_time);
+    } else {
+      stage_time -= FANCY_STAGE_BULLET_FRAMES;
 
-    shimmer = (uint8_t)(150U +
-                        (Triangle8((uint8_t)((mode3_phase * 3U) +
-                                             ((uint32_t)i * 41U))) >>
-                         2U));
-    r = Scale8(r, shimmer);
-    g = Scale8(g, shimmer);
-    b = Scale8(b, shimmer);
+      if (stage_time < FANCY_STAGE_PORTAL_FRAMES) {
+        FancyRenderPortal(stage_time);
+      } else {
+        stage_time -= FANCY_STAGE_PORTAL_FRAMES;
 
-    distance = CircularDistance(i, comet);
-    if (distance < 4U) {
-      uint8_t flash = (uint8_t)((4U - distance) * 22U);
-      r = ClampAddLed(r, flash);
-      g = ClampAddLed(g, flash);
-      b = ClampAddLed(b, flash);
+        if (stage_time < FANCY_STAGE_HEART_FRAMES) {
+          FancyRenderHeart(stage_time);
+        } else {
+          stage_time -= FANCY_STAGE_HEART_FRAMES;
+          FancyRenderGlitter(stage_time);
+        }
+      }
     }
-
-    SK6812_SetRGB((uint8_t)(i + 1U), r, g, b);
   }
 
-  mode3_phase += 3U;
+  mode3_phase++;
 }
 
 static void RenderModeSedentary(uint32_t now) {
@@ -462,7 +621,7 @@ static void RenderModeSedentary(uint32_t now) {
 
 static uint32_t CurrentFramePeriod(void) {
   if (app_mode == APP_MODE_FANCY) {
-    return FANCY_FRAME_MS;
+    return (tap_effect_active != 0U) ? MODE3_TAP_BLINK_MS : STATIC_FRAME_MS;
   }
 
   if (app_mode == APP_MODE_BLUE) {
@@ -525,7 +684,7 @@ static void App_HandleEvents(uint32_t now) {
   }
 
   if (TakeRequest(&hit_request)) {
-    if (app_mode == APP_MODE_BLUE) {
+    if (app_mode == APP_MODE_BLUE || app_mode == APP_MODE_RED) {
       tap_effect_started_ms = now;
       tap_effect_active = 1U;
       next_led_update_ms = 0U;
@@ -554,7 +713,7 @@ static void App_Render(uint32_t now) {
   next_led_update_ms = now + CurrentFramePeriod();
 
   if (app_mode == APP_MODE_RED) {
-    RenderModeRed();
+    RenderModeRed(now);
   } else if (app_mode == APP_MODE_BLUE) {
     RenderModeBlue(now);
   } else if (app_mode == APP_MODE_FANCY) {
