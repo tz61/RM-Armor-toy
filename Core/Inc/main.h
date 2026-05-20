@@ -61,10 +61,13 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define CHG_MODE_Pin GPIO_PIN_3
 #define CHG_MODE_GPIO_Port GPIOA
+#define CHG_MODE_EXTI_IRQn EXTI2_3_IRQn
 #define RST_COUNTER_Pin GPIO_PIN_4
 #define RST_COUNTER_GPIO_Port GPIOA
+#define RST_COUNTER_EXTI_IRQn EXTI4_15_IRQn
 #define HIT_TRIG_Pin GPIO_PIN_5
 #define HIT_TRIG_GPIO_Port GPIOB
+#define HIT_TRIG_EXTI_IRQn EXTI4_15_IRQn
 
 /* USER CODE BEGIN Private defines */
 
