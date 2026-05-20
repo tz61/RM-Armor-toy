@@ -109,10 +109,19 @@ static void MX_SPI1_Init(void);
 #define FANCY_STAGE_PORTAL_FRAMES 240UL
 #define FANCY_STAGE_HEART_FRAMES 220UL
 #define FANCY_STAGE_GLITTER_FRAMES 220UL
+#define FANCY_STAGE_SCANNER_FRAMES 210UL
+#define FANCY_STAGE_RAIN_FRAMES 240UL
+#define FANCY_STAGE_SPLIT_FRAMES 220UL
+#define FANCY_STAGE_ORBIT_FRAMES 260UL
+#define FANCY_STAGE_FIREWORK_FRAMES 240UL
+#define FANCY_STAGE_LOVE_FRAMES 260UL
 #define FANCY_STAGE_TOTAL_FRAMES                                             \
   (FANCY_STAGE_FLOW_FRAMES + FANCY_STAGE_BULLET_FRAMES +                     \
    FANCY_STAGE_PORTAL_FRAMES + FANCY_STAGE_HEART_FRAMES +                    \
-   FANCY_STAGE_GLITTER_FRAMES)
+   /*FANCY_STAGE_GLITTER_FRAMES + */FANCY_STAGE_SCANNER_FRAMES +                 \
+   FANCY_STAGE_RAIN_FRAMES + FANCY_STAGE_SPLIT_FRAMES +                      \
+   FANCY_STAGE_ORBIT_FRAMES + FANCY_STAGE_FIREWORK_FRAMES +                  \
+   FANCY_STAGE_LOVE_FRAMES)
 
 #define SEDENTARY_TOTAL_SECONDS (48UL * 60UL)
 #define SEDENTARY_LED_SECONDS (SEDENTARY_TOTAL_SECONDS / SK6812_LED_COUNT)
@@ -535,6 +544,164 @@ static void FancyRenderGlitter(uint32_t t) {
   }
 }
 
+static void FancyRenderScanner(uint32_t t) {
+  uint8_t pos = (uint8_t)((t / 6U) % ((FANCY_ROWS * 2U) - 2U));
+  uint8_t center =
+      (pos < FANCY_ROWS) ? pos : (uint8_t)(((FANCY_ROWS * 2U) - 2U) - pos);
+
+  SK6812_SetAllRGB(0U, 0U, 10U);
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t distance = AbsDiffU8(row, center);
+
+    if (distance < 4U) {
+      uint8_t level = (uint8_t)(LED_SOLID_LEVEL -
+                                ((uint16_t)distance * 34U));
+      FancySetPixel(row, 0U, level, 0U, (uint8_t)(level >> 1U));
+      FancySetPixel(row, 1U, 0U, (uint8_t)(level >> 1U), level);
+    }
+  }
+}
+
+static void FancyRenderRain(uint32_t t) {
+  SK6812_SetAllRGB(0U, 0U, 0U);
+
+  for (uint8_t side = 0U; side < 2U; side++) {
+    for (uint8_t drop = 0U; drop < 4U; drop++) {
+      uint8_t head = (uint8_t)((t / 7U + ((uint32_t)drop * 4U) +
+                                ((uint32_t)side * 2U)) %
+                               (FANCY_ROWS + 5U));
+      uint8_t hue = (uint8_t)(150U + (drop * 18U) + (side * 50U));
+
+      for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+        if (head >= row) {
+          uint8_t r;
+          uint8_t g;
+          uint8_t b;
+          uint8_t tail = (uint8_t)(head - row);
+
+          if (tail < 4U) {
+            uint8_t level = (uint8_t)(LED_SOLID_LEVEL -
+                                      ((uint16_t)tail * 34U));
+
+            ColorWheel((uint8_t)(hue + row * 9U), &r, &g, &b);
+            FancySetPixel(row, side, Scale8(r, (uint8_t)(level * 2U)),
+                          Scale8(g, (uint8_t)(level * 2U)),
+                          Scale8(b, (uint8_t)(level * 2U)));
+          }
+        }
+      }
+    }
+  }
+}
+
+static void FancyRenderSplit(uint32_t t) {
+  uint8_t radius = (uint8_t)((t / 8U) % FANCY_ROWS);
+  uint8_t hue = (uint8_t)(t * 4U);
+
+  SK6812_SetAllRGB(3U, 0U, 5U);
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t d0 = AbsDiffU8(row, 3U);
+    uint8_t d1 = AbsDiffU8(row, 4U);
+    uint8_t distance = (d0 < d1) ? d0 : d1;
+    uint8_t error = AbsDiffU8(distance, radius);
+
+    if (error < 3U) {
+      uint8_t level = (uint8_t)(LED_SOLID_LEVEL -
+                                ((uint16_t)error * 40U));
+
+      ColorWheel((uint8_t)(hue + row * 20U), &r, &g, &b);
+      FancySetRow(row, Scale8(r, (uint8_t)(level * 2U)),
+                  Scale8(g, (uint8_t)(level * 2U)),
+                  Scale8(b, (uint8_t)(level * 2U)));
+    }
+  }
+}
+
+static void FancyRenderOrbit(uint32_t t) {
+  uint8_t head = (uint8_t)((t / 5U) % SK6812_LED_COUNT);
+
+  SK6812_SetAllRGB(0U, 4U, 6U);
+
+  for (uint8_t trail = 0U; trail < 6U; trail++) {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t step = (uint8_t)((head + SK6812_LED_COUNT - trail) %
+                             SK6812_LED_COUNT);
+    uint8_t row = (step < FANCY_ROWS) ? step : (uint8_t)(15U - step);
+    uint8_t side = (step < FANCY_ROWS) ? 0U : 1U;
+    uint8_t level = (uint8_t)(LED_SOLID_LEVEL -
+                              ((uint16_t)trail * 19U));
+
+    ColorWheel((uint8_t)(t * 3U + trail * 18U), &r, &g, &b);
+    FancySetPixel(row, side, Scale8(r, (uint8_t)(level * 2U)),
+                  Scale8(g, (uint8_t)(level * 2U)),
+                  Scale8(b, (uint8_t)(level * 2U)));
+  }
+}
+
+static void FancyRenderFirework(uint32_t t) {
+  uint32_t shot = t / 48U;
+  uint8_t age = (uint8_t)(t % 48U);
+  uint8_t center_row = (uint8_t)(FancyNoise8(61U, shot) % FANCY_ROWS);
+  uint8_t center_side = (uint8_t)(FancyNoise8(97U, shot) & 1U);
+  uint8_t radius = (uint8_t)(age / 8U);
+  uint8_t hue = FancyNoise8(131U, shot);
+
+  SK6812_SetAllRGB(0U, 0U, 0U);
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    for (uint8_t side = 0U; side < 2U; side++) {
+      uint8_t r;
+      uint8_t g;
+      uint8_t b;
+      uint8_t distance =
+          (uint8_t)(AbsDiffU8(row, center_row) + ((side == center_side) ? 0U : 1U));
+      uint8_t error = AbsDiffU8(distance, radius);
+
+      if (error < 2U) {
+        uint8_t level = (error == 0U) ? LED_SOLID_LEVEL : 54U;
+        uint8_t fade = (uint8_t)(255U - ((uint16_t)age * 3U));
+
+        ColorWheel((uint8_t)(hue + row * 13U + side * 35U), &r, &g, &b);
+        level = Scale8(level, fade);
+        FancySetPixel(row, side, Scale8(r, (uint8_t)(level * 2U)),
+                      Scale8(g, (uint8_t)(level * 2U)),
+                      Scale8(b, (uint8_t)(level * 2U)));
+      }
+    }
+  }
+}
+
+static void FancyRenderLove(uint32_t t) {
+  static const uint8_t heart_shape[FANCY_ROWS] = {58U, 112U, 127U, 120U,
+                                                  96U, 70U,  44U,  22U};
+  uint8_t pulse = Triangle8((uint8_t)(t * 3U));
+
+  for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
+    uint8_t glow =
+        ClampAddLed(Scale8(heart_shape[row], (uint8_t)(160U + (pulse >> 2U))),
+                    (uint8_t)(pulse >> 4U));
+
+    FancySetRow(row, glow, (uint8_t)(glow >> 5U), (uint8_t)(glow >> 2U));
+  }
+
+  if (((t / 18U) & 1UL) == 0UL) {
+    FancySetPixel(1U, 0U, LED_SOLID_LEVEL, LED_SOLID_LEVEL, LED_SOLID_LEVEL);
+    FancySetPixel(1U, 1U, LED_SOLID_LEVEL, LED_SOLID_LEVEL, LED_SOLID_LEVEL);
+  }
+
+  if (((t / 31U) & 1UL) == 0UL) {
+    FancySetPixel(5U, 0U, LED_SOLID_LEVEL, 20U, LED_SOLID_LEVEL);
+    FancySetPixel(5U, 1U, LED_SOLID_LEVEL, 20U, LED_SOLID_LEVEL);
+  }
+}
+
 static void RenderModeRed(uint32_t now) {
   if (tap_effect_active) {
     uint32_t age = now - tap_effect_started_ms;
@@ -569,27 +736,72 @@ static void RenderModeFancy(void) {
 
   if (stage_time < FANCY_STAGE_FLOW_FRAMES) {
     FancyRenderFlow(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_FLOW_FRAMES;
+  if (stage_time < FANCY_STAGE_BULLET_FRAMES) {
+    FancyRenderBullets(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_BULLET_FRAMES;
+  if (stage_time < FANCY_STAGE_PORTAL_FRAMES) {
+    FancyRenderPortal(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_PORTAL_FRAMES;
+  if (stage_time < FANCY_STAGE_HEART_FRAMES) {
+    FancyRenderHeart(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  // stage_time -= FANCY_STAGE_HEART_FRAMES;
+  // if (stage_time < FANCY_STAGE_GLITTER_FRAMES) {
+  //   FancyRenderGlitter(stage_time);
+  //   mode3_phase++;
+  //   return;
+  // }
+
+  stage_time -= FANCY_STAGE_GLITTER_FRAMES;
+  if (stage_time < FANCY_STAGE_SCANNER_FRAMES) {
+    FancyRenderScanner(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_SCANNER_FRAMES;
+  if (stage_time < FANCY_STAGE_RAIN_FRAMES) {
+    FancyRenderRain(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_RAIN_FRAMES;
+  if (stage_time < FANCY_STAGE_SPLIT_FRAMES) {
+    FancyRenderSplit(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_SPLIT_FRAMES;
+  if (stage_time < FANCY_STAGE_ORBIT_FRAMES) {
+    FancyRenderOrbit(stage_time);
+    mode3_phase++;
+    return;
+  }
+
+  stage_time -= FANCY_STAGE_ORBIT_FRAMES;
+  if (stage_time < FANCY_STAGE_FIREWORK_FRAMES) {
+    FancyRenderFirework(stage_time);
   } else {
-    stage_time -= FANCY_STAGE_FLOW_FRAMES;
-
-    if (stage_time < FANCY_STAGE_BULLET_FRAMES) {
-      FancyRenderBullets(stage_time);
-    } else {
-      stage_time -= FANCY_STAGE_BULLET_FRAMES;
-
-      if (stage_time < FANCY_STAGE_PORTAL_FRAMES) {
-        FancyRenderPortal(stage_time);
-      } else {
-        stage_time -= FANCY_STAGE_PORTAL_FRAMES;
-
-        if (stage_time < FANCY_STAGE_HEART_FRAMES) {
-          FancyRenderHeart(stage_time);
-        } else {
-          stage_time -= FANCY_STAGE_HEART_FRAMES;
-          FancyRenderGlitter(stage_time);
-        }
-      }
-    }
+    stage_time -= FANCY_STAGE_FIREWORK_FRAMES;
+    FancyRenderLove(stage_time);
   }
 
   mode3_phase++;
