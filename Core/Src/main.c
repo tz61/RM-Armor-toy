@@ -67,35 +67,8 @@ static void MX_SPI1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-uint8_t SK6812_DATA[8 * 3 + 8] = {0};
-int buz_on = 0;
-uint64_t last_sound_time = 0;
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
-  if (GPIO_Pin == CHG_MODE_Pin) {
-    if (HAL_GetTick() - last_sound_time > 500) {
-      last_sound_time = HAL_GetTick();
-      // 100ms
-      if (!buz_on) {
-        HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
-      } else {
-        HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_3);
-      }
-      buz_on = ~buz_on;
-    }
-  }
-}
-void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
-  if (hrtc->Instance == RTC) {
-    // if (!buz_on) {
-    //   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
-    // } else {
-    //   HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_3);
-    // }
-    buz_on = ~buz_on;
-  }
-}
-
-// SK6812
+#define LED_MAX_LUMINANCE 128U
+#define LED_SOLID_LEVEL (LED_MAX_LUMINANCE - 1U)
 
 #define SK6812_LED_COUNT 16U
 
@@ -116,10 +89,178 @@ void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
 #define SK6812_TX_BYTES                                                        \
   (SK6812_RESET_BYTES + SK6812_DATA_BYTES + SK6812_RESET_BYTES)
 
+#define APP_MODE_COUNT 4U
+#define KEY_DEBOUNCE_MS 180U
+#define HIT_DEBOUNCE_MS 70U
+
+#define BUZZER_BEEP_ON_MS 35U
+#define BUZZER_BEEP_OFF_MS 35U
+#define BUZZER_MAX_BEEPS 8U
+
+#define MODE1_TAP_EFFECT_MS 420U
+#define MODE3_FRAME_MS 35U
+#define STATIC_FRAME_MS 80U
+#define SEDENTARY_FRAME_MS 120U
+
+#define SEDENTARY_TOTAL_SECONDS (48UL * 60UL)
+#define SEDENTARY_LED_SECONDS (SEDENTARY_TOTAL_SECONDS / SK6812_LED_COUNT)
+#define SEDENTARY_DONE_BEEPS 5U
+#define RTC_WAKEUP_COUNTER_1HZ 0U
+
+typedef enum {
+  APP_MODE_RED = 1U,
+  APP_MODE_BLUE,
+  APP_MODE_FANCY,
+  APP_MODE_SEDENTARY,
+} AppMode;
+
+typedef struct {
+  uint8_t beeps_left;
+  uint8_t output_on;
+  uint32_t next_change_ms;
+} BuzzerState;
+
 static uint8_t sk6812_rgb[SK6812_LED_COUNT][3]; // R, G, B
 static uint8_t sk6812_tx_buf[SK6812_TX_BYTES];
 
 static volatile uint8_t sk6812_dma_busy = 0;
+static volatile uint8_t chg_mode_request = 0U;
+static volatile uint8_t reset_cnt_request = 0U;
+static volatile uint8_t hit_request = 0U;
+static volatile uint32_t rtc_second_ticks = 0U;
+
+static uint32_t last_chg_irq_ms = 0U;
+static uint32_t last_reset_irq_ms = 0U;
+static uint32_t last_hit_irq_ms = 0U;
+
+static AppMode app_mode = APP_MODE_RED;
+static BuzzerState buzzer = {0U, 0U, 0U};
+static uint32_t next_led_update_ms = 0U;
+static uint32_t mode3_phase = 0U;
+static uint32_t tap_effect_started_ms = 0U;
+static uint8_t tap_effect_active = 0U;
+static uint32_t sedentary_seconds = 0U;
+static uint8_t sedentary_reminder_active = 0U;
+
+static uint8_t TimeReached(uint32_t now, uint32_t target) {
+  return ((int32_t)(now - target) >= 0) ? 1U : 0U;
+}
+
+static uint8_t TimeElapsed(uint32_t now, uint32_t start, uint32_t period) {
+  return ((uint32_t)(now - start) >= period) ? 1U : 0U;
+}
+
+static uint8_t ClampLed(uint8_t value) {
+  return (value > LED_MAX_LUMINANCE) ? LED_MAX_LUMINANCE : value;
+}
+
+static uint8_t ClampAddLed(uint8_t value, uint8_t add) {
+  uint16_t sum = (uint16_t)value + (uint16_t)add;
+  return (sum > LED_MAX_LUMINANCE) ? LED_MAX_LUMINANCE : (uint8_t)sum;
+}
+
+static uint8_t TakeRequest(volatile uint8_t *request) {
+  uint8_t value;
+
+  __disable_irq();
+  value = *request;
+  *request = 0U;
+  __enable_irq();
+
+  return value;
+}
+
+static uint32_t TakeRtcSecondTicks(void) {
+  uint32_t ticks;
+
+  __disable_irq();
+  ticks = rtc_second_ticks;
+  rtc_second_ticks = 0U;
+  __enable_irq();
+
+  return ticks;
+}
+
+static void Buzzer_SetOutput(uint8_t on) {
+  if (on) {
+    __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3,
+                          (uint32_t)((htim2.Init.Period + 1U) / 2U));
+    HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
+  } else {
+    HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_3);
+  }
+}
+
+static void Buzzer_Cancel(void) {
+  buzzer.beeps_left = 0U;
+  buzzer.output_on = 0U;
+  buzzer.next_change_ms = 0U;
+  Buzzer_SetOutput(0U);
+}
+
+static void Buzzer_RequestBeeps(uint8_t count) {
+  if (count == 0U) {
+    return;
+  }
+
+  if (count > BUZZER_MAX_BEEPS) {
+    count = BUZZER_MAX_BEEPS;
+  }
+
+  Buzzer_SetOutput(0U);
+  buzzer.beeps_left = count;
+  buzzer.output_on = 0U;
+  buzzer.next_change_ms = HAL_GetTick();
+}
+
+static void Buzzer_Task(uint32_t now) {
+  if (buzzer.output_on) {
+    if (TimeReached(now, buzzer.next_change_ms)) {
+      Buzzer_SetOutput(0U);
+      buzzer.output_on = 0U;
+      buzzer.next_change_ms = now + BUZZER_BEEP_OFF_MS;
+    }
+
+    return;
+  }
+
+  if ((buzzer.beeps_left > 0U) && TimeReached(now, buzzer.next_change_ms)) {
+    Buzzer_SetOutput(1U);
+    buzzer.output_on = 1U;
+    buzzer.beeps_left--;
+    buzzer.next_change_ms = now + BUZZER_BEEP_ON_MS;
+  }
+}
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  uint32_t now = HAL_GetTick();
+
+  if (GPIO_Pin == CHG_MODE_Pin) {
+    if ((last_chg_irq_ms == 0U) ||
+        TimeElapsed(now, last_chg_irq_ms, KEY_DEBOUNCE_MS)) {
+      last_chg_irq_ms = now;
+      chg_mode_request = 1U;
+    }
+  } else if (GPIO_Pin == RST_COUNTER_Pin) {
+    if ((last_reset_irq_ms == 0U) ||
+        TimeElapsed(now, last_reset_irq_ms, KEY_DEBOUNCE_MS)) {
+      last_reset_irq_ms = now;
+      reset_cnt_request = 1U;
+    }
+  } else if (GPIO_Pin == HIT_TRIG_Pin) {
+    if ((last_hit_irq_ms == 0U) ||
+        TimeElapsed(now, last_hit_irq_ms, HIT_DEBOUNCE_MS)) {
+      last_hit_irq_ms = now;
+      hit_request = 1U;
+    }
+  }
+}
+
+void HAL_RTCEx_WakeUpTimerEventCallback(RTC_HandleTypeDef *hrtc) {
+  if (hrtc->Instance == RTC) {
+    rtc_second_ticks++;
+  }
+}
 static void SK6812_WriteEncodedBit(uint16_t *bit_pos, uint8_t bit_is_one) {
   uint8_t code = bit_is_one ? SK6812_CODE_1 : SK6812_CODE_0;
   // 5-bit code, MSB first
@@ -140,10 +281,15 @@ void SK6812_SetRGB(uint8_t i, uint8_t r, uint8_t g, uint8_t b) {
   if ((i == 0U) || (i > SK6812_LED_COUNT)) {
     return;
   }
-  i--; // 用户传 1~8，数组用 0~7
-  sk6812_rgb[i][0] = r;
-  sk6812_rgb[i][1] = g;
-  sk6812_rgb[i][2] = b;
+  i--; // User passes 1..16, array uses 0..15.
+  sk6812_rgb[i][0] = ClampLed(r);
+  sk6812_rgb[i][1] = ClampLed(g);
+  sk6812_rgb[i][2] = ClampLed(b);
+}
+static void SK6812_SetAllRGB(uint8_t r, uint8_t g, uint8_t b) {
+  for (uint8_t i = 1U; i <= SK6812_LED_COUNT; i++) {
+    SK6812_SetRGB(i, r, g, b);
+  }
 }
 HAL_StatusTypeDef SK6812_Show(void) {
   if (sk6812_dma_busy) {
@@ -183,6 +329,263 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
     sk6812_dma_busy = 0U;
   }
 }
+
+static uint8_t Triangle8(uint8_t x) {
+  return (x < 128U) ? (uint8_t)(x << 1U) : (uint8_t)((255U - x) << 1U);
+}
+
+static uint8_t Scale8(uint8_t value, uint8_t scale) {
+  return (uint8_t)(((uint16_t)value * (uint16_t)scale) / 255U);
+}
+
+static uint8_t CircularDistance(uint8_t a, uint8_t b) {
+  uint8_t diff = (a > b) ? (uint8_t)(a - b) : (uint8_t)(b - a);
+
+  if (diff > (SK6812_LED_COUNT / 2U)) {
+    diff = (uint8_t)(SK6812_LED_COUNT - diff);
+  }
+
+  return diff;
+}
+
+static void ColorWheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b) {
+  pos = (uint8_t)(255U - pos);
+
+  if (pos < 85U) {
+    *r = (uint8_t)(LED_MAX_LUMINANCE -
+                   (((uint16_t)pos * LED_MAX_LUMINANCE) / 85U));
+    *g = 0U;
+    *b = (uint8_t)(((uint16_t)pos * LED_MAX_LUMINANCE) / 85U);
+  } else if (pos < 170U) {
+    pos = (uint8_t)(pos - 85U);
+    *r = 0U;
+    *g = (uint8_t)(((uint16_t)pos * LED_MAX_LUMINANCE) / 85U);
+    *b = (uint8_t)(LED_MAX_LUMINANCE -
+                   (((uint16_t)pos * LED_MAX_LUMINANCE) / 85U));
+  } else {
+    pos = (uint8_t)(pos - 170U);
+    *r = (uint8_t)(((uint16_t)pos * LED_MAX_LUMINANCE) / 85U);
+    *g = (uint8_t)(LED_MAX_LUMINANCE -
+                   (((uint16_t)pos * LED_MAX_LUMINANCE) / 85U));
+    *b = 0U;
+  }
+}
+
+static uint8_t BreathLevel(uint32_t now) {
+  uint32_t phase = now % 2200U;
+
+  if (phase < 1100U) {
+    return (uint8_t)(1U + ((phase * (LED_MAX_LUMINANCE - 1U)) / 1100U));
+  }
+
+  phase = 2199U - phase;
+  return (uint8_t)(1U + ((phase * (LED_MAX_LUMINANCE - 1U)) / 1100U));
+}
+
+static void RenderModeRed(uint32_t now) {
+  uint8_t accent = 0U;
+  uint32_t age = 0U;
+
+  if (tap_effect_active) {
+    age = now - tap_effect_started_ms;
+    if (age >= MODE1_TAP_EFFECT_MS) {
+      tap_effect_active = 0U;
+    } else {
+      accent =
+          (uint8_t)(((MODE1_TAP_EFFECT_MS - age) * 64U) / MODE1_TAP_EFFECT_MS);
+    }
+  }
+
+  for (uint8_t i = 0U; i < SK6812_LED_COUNT; i++) {
+    uint8_t sparkle = 0U;
+
+    if (accent > 0U) {
+      sparkle =
+          (uint8_t)(((uint16_t)accent *
+                     Triangle8((uint8_t)(age + ((uint32_t)i * 24U)))) /
+                    255U);
+    }
+
+    SK6812_SetRGB((uint8_t)(i + 1U), LED_SOLID_LEVEL, sparkle, sparkle);
+  }
+}
+
+static void RenderModeBlue(void) {
+  SK6812_SetAllRGB(0U, 0U, LED_SOLID_LEVEL);
+}
+
+static void RenderModeFancy(void) {
+  uint8_t comet = (uint8_t)((mode3_phase >> 3U) % SK6812_LED_COUNT);
+
+  for (uint8_t i = 0U; i < SK6812_LED_COUNT; i++) {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t shimmer;
+    uint8_t distance;
+
+    ColorWheel((uint8_t)(mode3_phase + ((uint32_t)i * 16U)), &r, &g, &b);
+
+    shimmer = (uint8_t)(150U +
+                        (Triangle8((uint8_t)((mode3_phase * 3U) +
+                                             ((uint32_t)i * 41U))) >>
+                         2U));
+    r = Scale8(r, shimmer);
+    g = Scale8(g, shimmer);
+    b = Scale8(b, shimmer);
+
+    distance = CircularDistance(i, comet);
+    if (distance < 4U) {
+      uint8_t flash = (uint8_t)((4U - distance) * 22U);
+      r = ClampAddLed(r, flash);
+      g = ClampAddLed(g, flash);
+      b = ClampAddLed(b, flash);
+    }
+
+    SK6812_SetRGB((uint8_t)(i + 1U), r, g, b);
+  }
+
+  mode3_phase += 3U;
+}
+
+static void RenderModeSedentary(uint32_t now) {
+  if (sedentary_reminder_active) {
+    uint8_t white = BreathLevel(now);
+    SK6812_SetAllRGB(white, white, white);
+    return;
+  }
+
+  for (uint8_t i = 0U; i < SK6812_LED_COUNT; i++) {
+    uint32_t led_start = (uint32_t)i * SEDENTARY_LED_SECONDS;
+    uint32_t led_end = led_start + SEDENTARY_LED_SECONDS;
+
+    if (sedentary_seconds >= led_end) {
+      SK6812_SetRGB((uint8_t)(i + 1U), 0U, LED_SOLID_LEVEL, 0U);
+    } else if (sedentary_seconds < led_start) {
+      SK6812_SetRGB((uint8_t)(i + 1U), 0U, 0U, 0U);
+    } else {
+      uint32_t minute_in_led = (sedentary_seconds - led_start) / 60U;
+
+      if (minute_in_led == 0U) {
+        SK6812_SetRGB((uint8_t)(i + 1U), LED_SOLID_LEVEL, 0U, 0U);
+      } else if (minute_in_led == 1U) {
+        SK6812_SetRGB((uint8_t)(i + 1U), 0U, 0U, LED_SOLID_LEVEL);
+      } else {
+        SK6812_SetRGB((uint8_t)(i + 1U), 0U, LED_SOLID_LEVEL, 0U);
+      }
+    }
+  }
+}
+
+static uint32_t CurrentFramePeriod(void) {
+  if (app_mode == APP_MODE_FANCY) {
+    return MODE3_FRAME_MS;
+  }
+
+  if (app_mode == APP_MODE_SEDENTARY) {
+    return SEDENTARY_FRAME_MS;
+  }
+
+  return STATIC_FRAME_MS;
+}
+
+static void Sedentary_Reset(void) {
+  sedentary_seconds = 0U;
+  sedentary_reminder_active = 0U;
+  next_led_update_ms = 0U;
+}
+
+static void App_SetMode(AppMode mode) {
+  app_mode = mode;
+  tap_effect_active = 0U;
+  next_led_update_ms = 0U;
+
+  if (app_mode == APP_MODE_SEDENTARY) {
+    Sedentary_Reset();
+  }
+
+  Buzzer_RequestBeeps((uint8_t)app_mode);
+}
+
+static void App_AdvanceMode(void) {
+  uint8_t next = (uint8_t)app_mode + 1U;
+
+  if (next > APP_MODE_COUNT) {
+    next = 1U;
+  }
+
+  App_SetMode((AppMode)next);
+}
+
+static void App_HandleEvents(uint32_t now) {
+  uint32_t ticks = TakeRtcSecondTicks();
+  uint8_t counter_was_reset = 0U;
+
+  if (TakeRequest(&chg_mode_request)) {
+    App_AdvanceMode();
+    counter_was_reset = (app_mode == APP_MODE_SEDENTARY) ? 1U : 0U;
+  }
+
+  if (TakeRequest(&reset_cnt_request)) {
+    if (app_mode == APP_MODE_SEDENTARY) {
+      uint8_t was_reminding = sedentary_reminder_active;
+      Sedentary_Reset();
+      counter_was_reset = 1U;
+      if (was_reminding) {
+        Buzzer_Cancel();
+      }
+    }
+  }
+
+  if (TakeRequest(&hit_request)) {
+    if (app_mode == APP_MODE_RED) {
+      tap_effect_started_ms = now;
+      tap_effect_active = 1U;
+      next_led_update_ms = 0U;
+    } else if (app_mode == APP_MODE_FANCY) {
+      mode3_phase += 47U;
+    }
+  }
+
+  if ((counter_was_reset == 0U) && (ticks > 0U) &&
+      (app_mode == APP_MODE_SEDENTARY) &&
+      (sedentary_reminder_active == 0U)) {
+    if (sedentary_seconds + ticks >= SEDENTARY_TOTAL_SECONDS) {
+      sedentary_seconds = SEDENTARY_TOTAL_SECONDS;
+      sedentary_reminder_active = 1U;
+      next_led_update_ms = 0U;
+      Buzzer_RequestBeeps(SEDENTARY_DONE_BEEPS);
+    } else {
+      sedentary_seconds += ticks;
+    }
+  }
+}
+
+static void App_Render(uint32_t now) {
+  if (!TimeReached(now, next_led_update_ms) || SK6812_IsBusy()) {
+    return;
+  }
+
+  next_led_update_ms = now + CurrentFramePeriod();
+
+  if (app_mode == APP_MODE_RED) {
+    RenderModeRed(now);
+  } else if (app_mode == APP_MODE_BLUE) {
+    RenderModeBlue();
+  } else if (app_mode == APP_MODE_FANCY) {
+    RenderModeFancy();
+  } else {
+    RenderModeSedentary(now);
+  }
+
+  SK6812_Show();
+}
+
+static void App_Init(void) {
+  Buzzer_Cancel();
+  SK6812_SetAllRGB(LED_SOLID_LEVEL, 0U, 0U);
+  SK6812_Show();
+}
 /* USER CODE END 0 */
 
 /**
@@ -220,30 +623,18 @@ int main(void) {
   MX_USART1_UART_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  // __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, 115);
-  last_sound_time = HAL_GetTick();
+  App_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  int index = 0;
-  int r_i = 10, g_i = 128, b_i = 221;
-#define SHIFT_RGB 1
   while (1) {
-    index = (index + 1) % SK6812_LED_COUNT;
-    r_i = (r_i + 1) % 256;
-    g_i = (g_i + 1) % 256;
-    b_i = (b_i + 1) % 256;
-    for (int i = 0; i < SK6812_LED_COUNT; i++) {
-      SK6812_SetRGB(i + 1, ((r_i + i * 10) % 256) >> SHIFT_RGB,
-                    ((g_i + i * 10) % 256) >> SHIFT_RGB,
-                    ((b_i + i * 10) % 256) >> SHIFT_RGB);
-    }
+    uint32_t now = HAL_GetTick();
 
-    // HAL_Delay(10);
-    SK6812_Show();
-    // HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_3);
-    // HAL_TIM_PWM_Stop(&htim2, TIM_CHANNEL_3);
+    App_HandleEvents(now);
+    Buzzer_Task(now);
+    App_Render(now);
+    HAL_Delay(1);
 
     /* USER CODE END WHILE */
 
@@ -337,8 +728,8 @@ static void MX_RTC_Init(void) {
 
   /** Enable the WakeUp
    */
-  if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, 1, RTC_WAKEUPCLOCK_CK_SPRE_16BITS) !=
-      HAL_OK) {
+  if (HAL_RTCEx_SetWakeUpTimer_IT(&hrtc, RTC_WAKEUP_COUNTER_1HZ,
+                                  RTC_WAKEUPCLOCK_CK_SPRE_16BITS) != HAL_OK) {
     Error_Handler();
   }
   /* USER CODE BEGIN RTC_Init 2 */
@@ -399,9 +790,9 @@ static void MX_TIM2_Init(void) {
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
+  htim2.Init.Prescaler = 15;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 524;
+  htim2.Init.Period = 499;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim2) != HAL_OK) {
@@ -413,7 +804,7 @@ static void MX_TIM2_Init(void) {
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 262;
+  sConfigOC.Pulse = 250;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK) {
