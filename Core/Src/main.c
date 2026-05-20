@@ -97,8 +97,9 @@ static void MX_SPI1_Init(void);
 #define BUZZER_BEEP_OFF_MS 35U
 #define BUZZER_MAX_BEEPS 8U
 
-#define MODE1_TAP_EFFECT_MS 420U
-#define MODE3_FRAME_MS 35U
+#define MODE3_TAP_EFFECT_MS 1200U
+#define MODE3_TAP_BLINK_MS 80U
+#define FANCY_FRAME_MS 35U
 #define STATIC_FRAME_MS 80U
 #define SEDENTARY_FRAME_MS 120U
 
@@ -108,9 +109,9 @@ static void MX_SPI1_Init(void);
 #define RTC_WAKEUP_COUNTER_1HZ 0U
 
 typedef enum {
-  APP_MODE_RED = 1U,
+  APP_MODE_FANCY = 1U,
+  APP_MODE_RED,
   APP_MODE_BLUE,
-  APP_MODE_FANCY,
   APP_MODE_SEDENTARY,
 } AppMode;
 
@@ -133,7 +134,7 @@ static uint32_t last_chg_irq_ms = 0U;
 static uint32_t last_reset_irq_ms = 0U;
 static uint32_t last_hit_irq_ms = 0U;
 
-static AppMode app_mode = APP_MODE_RED;
+static AppMode app_mode = APP_MODE_FANCY;
 static BuzzerState buzzer = {0U, 0U, 0U};
 static uint32_t next_led_update_ms = 0U;
 static uint32_t mode3_phase = 0U;
@@ -382,35 +383,22 @@ static uint8_t BreathLevel(uint32_t now) {
   return (uint8_t)(1U + ((phase * (LED_MAX_LUMINANCE - 1U)) / 1100U));
 }
 
-static void RenderModeRed(uint32_t now) {
-  uint8_t accent = 0U;
-  uint32_t age = 0U;
-
-  if (tap_effect_active) {
-    age = now - tap_effect_started_ms;
-    if (age >= MODE1_TAP_EFFECT_MS) {
-      tap_effect_active = 0U;
-    } else {
-      accent =
-          (uint8_t)(((MODE1_TAP_EFFECT_MS - age) * 64U) / MODE1_TAP_EFFECT_MS);
-    }
-  }
-
-  for (uint8_t i = 0U; i < SK6812_LED_COUNT; i++) {
-    uint8_t sparkle = 0U;
-
-    if (accent > 0U) {
-      sparkle =
-          (uint8_t)(((uint16_t)accent *
-                     Triangle8((uint8_t)(age + ((uint32_t)i * 24U)))) /
-                    255U);
-    }
-
-    SK6812_SetRGB((uint8_t)(i + 1U), LED_SOLID_LEVEL, sparkle, sparkle);
-  }
+static void RenderModeRed(void) {
+  SK6812_SetAllRGB(LED_SOLID_LEVEL, 0U, 0U);
 }
 
-static void RenderModeBlue(void) {
+static void RenderModeBlue(uint32_t now) {
+  if (tap_effect_active) {
+    uint32_t age = now - tap_effect_started_ms;
+
+    if (age >= MODE3_TAP_EFFECT_MS) {
+      tap_effect_active = 0U;
+    } else if (((age / MODE3_TAP_BLINK_MS) & 1UL) == 0UL) {
+      SK6812_SetAllRGB(0U, 0U, 0U);
+      return;
+    }
+  }
+
   SK6812_SetAllRGB(0U, 0U, LED_SOLID_LEVEL);
 }
 
@@ -458,28 +446,27 @@ static void RenderModeSedentary(uint32_t now) {
   for (uint8_t i = 0U; i < SK6812_LED_COUNT; i++) {
     uint32_t led_start = (uint32_t)i * SEDENTARY_LED_SECONDS;
     uint32_t led_end = led_start + SEDENTARY_LED_SECONDS;
+    uint8_t level = 0U;
 
     if (sedentary_seconds >= led_end) {
-      SK6812_SetRGB((uint8_t)(i + 1U), 0U, LED_SOLID_LEVEL, 0U);
-    } else if (sedentary_seconds < led_start) {
-      SK6812_SetRGB((uint8_t)(i + 1U), 0U, 0U, 0U);
-    } else {
-      uint32_t minute_in_led = (sedentary_seconds - led_start) / 60U;
-
-      if (minute_in_led == 0U) {
-        SK6812_SetRGB((uint8_t)(i + 1U), LED_SOLID_LEVEL, 0U, 0U);
-      } else if (minute_in_led == 1U) {
-        SK6812_SetRGB((uint8_t)(i + 1U), 0U, 0U, LED_SOLID_LEVEL);
-      } else {
-        SK6812_SetRGB((uint8_t)(i + 1U), 0U, LED_SOLID_LEVEL, 0U);
-      }
+      level = LED_SOLID_LEVEL;
+    } else if (sedentary_seconds >= led_start) {
+      uint32_t elapsed_in_led = sedentary_seconds - led_start;
+      level = (uint8_t)((elapsed_in_led * LED_SOLID_LEVEL) /
+                        SEDENTARY_LED_SECONDS);
     }
+
+    SK6812_SetRGB((uint8_t)(i + 1U), level, level, level);
   }
 }
 
 static uint32_t CurrentFramePeriod(void) {
   if (app_mode == APP_MODE_FANCY) {
-    return MODE3_FRAME_MS;
+    return FANCY_FRAME_MS;
+  }
+
+  if (app_mode == APP_MODE_BLUE) {
+    return (tap_effect_active != 0U) ? MODE3_TAP_BLINK_MS : STATIC_FRAME_MS;
   }
 
   if (app_mode == APP_MODE_SEDENTARY) {
@@ -538,12 +525,10 @@ static void App_HandleEvents(uint32_t now) {
   }
 
   if (TakeRequest(&hit_request)) {
-    if (app_mode == APP_MODE_RED) {
+    if (app_mode == APP_MODE_BLUE) {
       tap_effect_started_ms = now;
       tap_effect_active = 1U;
       next_led_update_ms = 0U;
-    } else if (app_mode == APP_MODE_FANCY) {
-      mode3_phase += 47U;
     }
   }
 
@@ -569,9 +554,9 @@ static void App_Render(uint32_t now) {
   next_led_update_ms = now + CurrentFramePeriod();
 
   if (app_mode == APP_MODE_RED) {
-    RenderModeRed(now);
+    RenderModeRed();
   } else if (app_mode == APP_MODE_BLUE) {
-    RenderModeBlue();
+    RenderModeBlue(now);
   } else if (app_mode == APP_MODE_FANCY) {
     RenderModeFancy();
   } else {
@@ -583,7 +568,7 @@ static void App_Render(uint32_t now) {
 
 static void App_Init(void) {
   Buzzer_Cancel();
-  SK6812_SetAllRGB(LED_SOLID_LEVEL, 0U, 0U);
+  RenderModeFancy();
   SK6812_Show();
 }
 /* USER CODE END 0 */
