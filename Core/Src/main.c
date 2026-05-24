@@ -67,8 +67,16 @@ static void MX_SPI1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define LED_MAX_LUMINANCE 128U
-#define LED_SOLID_LEVEL (LED_MAX_LUMINANCE - 1U)
+#define LED_MAX_LUMINANCE 256U
+#define MODE4_LED_MAX_LUMINANCE 128U
+#if (LED_MAX_LUMINANCE < 1U) || (LED_MAX_LUMINANCE > 256U)
+#error "LED_MAX_LUMINANCE must be in the range 1..256"
+#endif
+#if (MODE4_LED_MAX_LUMINANCE < 1U) || (MODE4_LED_MAX_LUMINANCE > 256U)
+#error "MODE4_LED_MAX_LUMINANCE must be in the range 1..256"
+#endif
+#define LED_SOLID_LEVEL ((uint8_t)(LED_MAX_LUMINANCE - 1U))
+#define MODE4_LED_SOLID_LEVEL ((uint8_t)(MODE4_LED_MAX_LUMINANCE - 1U))
 
 #define SK6812_LED_COUNT 16U
 
@@ -96,6 +104,12 @@ static void MX_SPI1_Init(void);
 #define BUZZER_BEEP_ON_MS 35U
 #define BUZZER_BEEP_OFF_MS 35U
 #define BUZZER_MAX_BEEPS 8U
+#define BUZZER_BEEP_HZ 2000U
+
+#define STARTUP_TONE_COUNT 3U
+#define STARTUP_TONE_MS 140U
+#define STARTUP_LAST_TONE_MS 180U
+#define STARTUP_TONE_GAP_MS 28U
 
 #define MODE3_TAP_EFFECT_MS 500U
 #define MODE3_TAP_BLINK_MS 30U
@@ -125,6 +139,7 @@ static void MX_SPI1_Init(void);
 
 #define SEDENTARY_TOTAL_SECONDS (48UL * 60UL)
 #define SEDENTARY_LED_SECONDS (SEDENTARY_TOTAL_SECONDS / SK6812_LED_COUNT)
+#define SEDENTARY_PROGRESS_SHOW_MS 2000UL
 #define SEDENTARY_DONE_BEEPS 5U
 #define RTC_WAKEUP_COUNTER_1HZ 0U
 
@@ -143,6 +158,7 @@ typedef struct {
 
 static uint8_t sk6812_rgb[SK6812_LED_COUNT][3]; // R, G, B
 static uint8_t sk6812_tx_buf[SK6812_TX_BYTES];
+static uint8_t active_led_solid_level = LED_SOLID_LEVEL;
 
 static volatile uint8_t sk6812_dma_busy = 0;
 static volatile uint8_t chg_mode_request = 0U;
@@ -162,6 +178,7 @@ static uint32_t tap_effect_started_ms = 0U;
 static uint8_t tap_effect_active = 0U;
 static uint32_t sedentary_seconds = 0U;
 static uint8_t sedentary_reminder_active = 0U;
+static uint32_t sedentary_progress_until_ms = 0U;
 
 static uint8_t TimeReached(uint32_t now, uint32_t target) {
   return ((int32_t)(now - target) >= 0) ? 1U : 0U;
@@ -172,12 +189,12 @@ static uint8_t TimeElapsed(uint32_t now, uint32_t start, uint32_t period) {
 }
 
 static uint8_t ClampLed(uint8_t value) {
-  return (value > LED_MAX_LUMINANCE) ? LED_MAX_LUMINANCE : value;
+  return (value > active_led_solid_level) ? active_led_solid_level : value;
 }
 
 static uint8_t ClampAddLed(uint8_t value, uint8_t add) {
   uint16_t sum = (uint16_t)value + (uint16_t)add;
-  return (sum > LED_MAX_LUMINANCE) ? LED_MAX_LUMINANCE : (uint8_t)sum;
+  return (sum > active_led_solid_level) ? active_led_solid_level : (uint8_t)sum;
 }
 
 static uint8_t TakeRequest(volatile uint8_t *request) {
@@ -200,6 +217,28 @@ static uint32_t TakeRtcSecondTicks(void) {
   __enable_irq();
 
   return ticks;
+}
+
+static void Buzzer_SetFrequency(uint16_t frequency_hz) {
+  uint32_t counter_hz;
+  uint32_t period_counts;
+
+  if (frequency_hz == 0U) {
+    return;
+  }
+
+  counter_hz = HAL_RCC_GetPCLK1Freq() / (htim2.Init.Prescaler + 1U);
+  period_counts = (counter_hz + ((uint32_t)frequency_hz / 2U)) /
+                  (uint32_t)frequency_hz;
+
+  if (period_counts < 2U) {
+    period_counts = 2U;
+  }
+
+  htim2.Init.Period = period_counts - 1U;
+  __HAL_TIM_SET_AUTORELOAD(&htim2, htim2.Init.Period);
+  __HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_3, period_counts / 2U);
+  __HAL_TIM_SET_COUNTER(&htim2, 0U);
 }
 
 static void Buzzer_SetOutput(uint8_t on) {
@@ -229,6 +268,7 @@ static void Buzzer_RequestBeeps(uint8_t count) {
   }
 
   Buzzer_SetOutput(0U);
+  Buzzer_SetFrequency(BUZZER_BEEP_HZ);
   buzzer.beeps_left = count;
   buzzer.output_on = 0U;
   buzzer.next_change_ms = HAL_GetTick();
@@ -253,10 +293,31 @@ static void Buzzer_Task(uint32_t now) {
   }
 }
 
+static void StartupSound_Play(void) {
+  static const uint16_t tone_hz[STARTUP_TONE_COUNT] = {512U, 573U, 760U};
+
+  Buzzer_Cancel();
+
+  for (uint8_t i = 0U; i < STARTUP_TONE_COUNT; i++) {
+    Buzzer_SetFrequency(tone_hz[i]);
+    Buzzer_SetOutput(1U);
+    HAL_Delay((i == (STARTUP_TONE_COUNT - 1U)) ? STARTUP_LAST_TONE_MS
+                                               : STARTUP_TONE_MS);
+    Buzzer_SetOutput(0U);
+
+    if (i != (STARTUP_TONE_COUNT - 1U)) {
+      HAL_Delay(STARTUP_TONE_GAP_MS);
+    }
+  }
+
+  Buzzer_SetFrequency(BUZZER_BEEP_HZ);
+  Buzzer_Cancel();
+}
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
   uint32_t now = HAL_GetTick();
 
-  if (GPIO_Pin == RST_COUNTER_Pin) {
+  if (GPIO_Pin == CHG_MODE_Pin) {
     if ((last_chg_irq_ms == 0U) ||
         TimeElapsed(now, last_chg_irq_ms, KEY_DEBOUNCE_MS)) {
       last_chg_irq_ms = now;
@@ -359,38 +420,58 @@ static uint8_t Scale8(uint8_t value, uint8_t scale) {
   return (uint8_t)(((uint16_t)value * (uint16_t)scale) / 255U);
 }
 
-static void ColorWheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b) {
+static uint8_t ClampScale(uint16_t scale) {
+  return (scale > 255U) ? 255U : (uint8_t)scale;
+}
+
+static uint8_t LevelToScale(uint8_t level) {
+  return ClampScale((uint16_t)level * 2U);
+}
+
+static uint8_t LevelToScaleMax(uint8_t level, uint8_t max_level) {
+  if (max_level == 0U) {
+    return 0U;
+  }
+
+  return (uint8_t)(((uint16_t)level * 255U) / max_level);
+}
+
+static void ColorWheelMax(uint8_t pos, uint8_t max_level, uint8_t *r,
+                          uint8_t *g, uint8_t *b) {
+  uint16_t max = max_level;
+
   pos = (uint8_t)(255U - pos);
 
   if (pos < 85U) {
-    *r = (uint8_t)(LED_MAX_LUMINANCE -
-                   (((uint16_t)pos * LED_MAX_LUMINANCE) / 85U));
+    *r = (uint8_t)(max - (((uint16_t)pos * max) / 85U));
     *g = 0U;
-    *b = (uint8_t)(((uint16_t)pos * LED_MAX_LUMINANCE) / 85U);
+    *b = (uint8_t)(((uint16_t)pos * max) / 85U);
   } else if (pos < 170U) {
     pos = (uint8_t)(pos - 85U);
     *r = 0U;
-    *g = (uint8_t)(((uint16_t)pos * LED_MAX_LUMINANCE) / 85U);
-    *b = (uint8_t)(LED_MAX_LUMINANCE -
-                   (((uint16_t)pos * LED_MAX_LUMINANCE) / 85U));
+    *g = (uint8_t)(((uint16_t)pos * max) / 85U);
+    *b = (uint8_t)(max - (((uint16_t)pos * max) / 85U));
   } else {
     pos = (uint8_t)(pos - 170U);
-    *r = (uint8_t)(((uint16_t)pos * LED_MAX_LUMINANCE) / 85U);
-    *g = (uint8_t)(LED_MAX_LUMINANCE -
-                   (((uint16_t)pos * LED_MAX_LUMINANCE) / 85U));
+    *r = (uint8_t)(((uint16_t)pos * max) / 85U);
+    *g = (uint8_t)(max - (((uint16_t)pos * max) / 85U));
     *b = 0U;
   }
 }
 
-static uint8_t BreathLevel(uint32_t now) {
+static void ColorWheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b) {
+  ColorWheelMax(pos, LED_SOLID_LEVEL, r, g, b);
+}
+
+static uint8_t BreathLevel(uint32_t now, uint8_t max_level) {
   uint32_t phase = now % 2200U;
 
   if (phase < 1100U) {
-    return (uint8_t)(1U + ((phase * (LED_MAX_LUMINANCE - 1U)) / 1100U));
+    return (uint8_t)(1U + ((phase * max_level) / 1100U));
   }
 
   phase = 2199U - phase;
-  return (uint8_t)(1U + ((phase * (LED_MAX_LUMINANCE - 1U)) / 1100U));
+  return (uint8_t)(1U + ((phase * max_level) / 1100U));
 }
 
 static uint8_t FancyLedAt(uint8_t row, uint8_t right_side) {
@@ -499,9 +580,9 @@ static void FancyRenderPortal(uint32_t t) {
       uint8_t level = (edge == 0U) ? LED_SOLID_LEVEL : 42U;
 
       ColorWheel((uint8_t)(hue + ((uint32_t)row * 18U)), &r, &g, &b);
-      r = Scale8(r, (uint8_t)(level * 2U));
-      g = Scale8(g, (uint8_t)(level * 2U));
-      b = Scale8(b, (uint8_t)(level * 2U));
+      r = Scale8(r, LevelToScale(level));
+      g = Scale8(g, LevelToScale(level));
+      b = Scale8(b, LevelToScale(level));
       FancySetRow(row, r, g, b);
     }
   }
@@ -513,14 +594,14 @@ static void FancyRenderHeart(uint32_t t) {
   for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
     uint8_t shape = (uint8_t)(LED_SOLID_LEVEL -
                               ((uint16_t)row * (LED_SOLID_LEVEL / 9U)));
-    uint8_t glow = ClampAddLed(Scale8(shape, (uint8_t)(130U + (beat >> 1U))),
+    uint8_t glow = ClampAddLed(Scale8(shape, ClampScale(130U + (beat >> 1U))),
                                (uint8_t)(beat >> 3U));
 
     FancySetRow(row, glow, (uint8_t)(glow >> 4U), (uint8_t)(glow >> 2U));
   }
 }
 
-static void FancyRenderGlitter(uint32_t t) {
+static void __attribute__((unused)) FancyRenderGlitter(uint32_t t) {
   for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
     uint8_t r;
     uint8_t g;
@@ -585,9 +666,9 @@ static void FancyRenderRain(uint32_t t) {
                                       ((uint16_t)tail * 34U));
 
             ColorWheel((uint8_t)(hue + row * 9U), &r, &g, &b);
-            FancySetPixel(row, side, Scale8(r, (uint8_t)(level * 2U)),
-                          Scale8(g, (uint8_t)(level * 2U)),
-                          Scale8(b, (uint8_t)(level * 2U)));
+            FancySetPixel(row, side, Scale8(r, LevelToScale(level)),
+                          Scale8(g, LevelToScale(level)),
+                          Scale8(b, LevelToScale(level)));
           }
         }
       }
@@ -615,9 +696,9 @@ static void FancyRenderSplit(uint32_t t) {
                                 ((uint16_t)error * 40U));
 
       ColorWheel((uint8_t)(hue + row * 20U), &r, &g, &b);
-      FancySetRow(row, Scale8(r, (uint8_t)(level * 2U)),
-                  Scale8(g, (uint8_t)(level * 2U)),
-                  Scale8(b, (uint8_t)(level * 2U)));
+      FancySetRow(row, Scale8(r, LevelToScale(level)),
+                  Scale8(g, LevelToScale(level)),
+                  Scale8(b, LevelToScale(level)));
     }
   }
 }
@@ -639,9 +720,9 @@ static void FancyRenderOrbit(uint32_t t) {
                               ((uint16_t)trail * 19U));
 
     ColorWheel((uint8_t)(t * 3U + trail * 18U), &r, &g, &b);
-    FancySetPixel(row, side, Scale8(r, (uint8_t)(level * 2U)),
-                  Scale8(g, (uint8_t)(level * 2U)),
-                  Scale8(b, (uint8_t)(level * 2U)));
+    FancySetPixel(row, side, Scale8(r, LevelToScale(level)),
+                  Scale8(g, LevelToScale(level)),
+                  Scale8(b, LevelToScale(level)));
   }
 }
 
@@ -670,9 +751,9 @@ static void FancyRenderFirework(uint32_t t) {
 
         ColorWheel((uint8_t)(hue + row * 13U + side * 35U), &r, &g, &b);
         level = Scale8(level, fade);
-        FancySetPixel(row, side, Scale8(r, (uint8_t)(level * 2U)),
-                      Scale8(g, (uint8_t)(level * 2U)),
-                      Scale8(b, (uint8_t)(level * 2U)));
+        FancySetPixel(row, side, Scale8(r, LevelToScale(level)),
+                      Scale8(g, LevelToScale(level)),
+                      Scale8(b, LevelToScale(level)));
       }
     }
   }
@@ -685,7 +766,7 @@ static void FancyRenderLove(uint32_t t) {
 
   for (uint8_t row = 0U; row < FANCY_ROWS; row++) {
     uint8_t glow =
-        ClampAddLed(Scale8(heart_shape[row], (uint8_t)(160U + (pulse >> 2U))),
+        ClampAddLed(Scale8(heart_shape[row], ClampScale(160U + (pulse >> 2U))),
                     (uint8_t)(pulse >> 4U));
 
     FancySetRow(row, glow, (uint8_t)(glow >> 5U), (uint8_t)(glow >> 2U));
@@ -809,8 +890,13 @@ static void RenderModeFancy(void) {
 
 static void RenderModeSedentary(uint32_t now) {
   if (sedentary_reminder_active) {
-    uint8_t white = BreathLevel(now);
+    uint8_t white = BreathLevel(now, MODE4_LED_SOLID_LEVEL);
     SK6812_SetAllRGB(white, white, white);
+    return;
+  }
+
+  if (TimeReached(now, sedentary_progress_until_ms)) {
+    SK6812_SetAllRGB(0U, 0U, 0U);
     return;
   }
 
@@ -818,16 +904,24 @@ static void RenderModeSedentary(uint32_t now) {
     uint32_t led_start = (uint32_t)i * SEDENTARY_LED_SECONDS;
     uint32_t led_end = led_start + SEDENTARY_LED_SECONDS;
     uint8_t level = 0U;
+    uint8_t scale;
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
 
     if (sedentary_seconds >= led_end) {
-      level = LED_SOLID_LEVEL;
+      level = MODE4_LED_SOLID_LEVEL;
     } else if (sedentary_seconds >= led_start) {
       uint32_t elapsed_in_led = sedentary_seconds - led_start;
-      level = (uint8_t)((elapsed_in_led * LED_SOLID_LEVEL) /
+      level = (uint8_t)((elapsed_in_led * MODE4_LED_SOLID_LEVEL) /
                         SEDENTARY_LED_SECONDS);
     }
 
-    SK6812_SetRGB((uint8_t)(i + 1U), level, level, level);
+    ColorWheelMax((uint8_t)((uint32_t)i * 16U), MODE4_LED_SOLID_LEVEL, &r, &g,
+                  &b);
+    scale = LevelToScaleMax(level, MODE4_LED_SOLID_LEVEL);
+    SK6812_SetRGB((uint8_t)(i + 1U), Scale8(r, scale), Scale8(g, scale),
+                  Scale8(b, scale));
   }
 }
 
@@ -850,12 +944,15 @@ static uint32_t CurrentFramePeriod(void) {
 static void Sedentary_Reset(void) {
   sedentary_seconds = 0U;
   sedentary_reminder_active = 0U;
+  sedentary_progress_until_ms = 0U;
   next_led_update_ms = 0U;
 }
 
 static void App_SetMode(AppMode mode) {
   app_mode = mode;
   tap_effect_active = 0U;
+  active_led_solid_level =
+      (app_mode == APP_MODE_SEDENTARY) ? MODE4_LED_SOLID_LEVEL : LED_SOLID_LEVEL;
   next_led_update_ms = 0U;
 
   if (app_mode == APP_MODE_SEDENTARY) {
@@ -899,6 +996,10 @@ static void App_HandleEvents(uint32_t now) {
     if (app_mode == APP_MODE_BLUE || app_mode == APP_MODE_RED) {
       tap_effect_started_ms = now;
       tap_effect_active = 1U;
+      next_led_update_ms = 0U;
+    } else if ((app_mode == APP_MODE_SEDENTARY) &&
+               (sedentary_reminder_active == 0U)) {
+      sedentary_progress_until_ms = now + SEDENTARY_PROGRESS_SHOW_MS;
       next_led_update_ms = 0U;
     }
   }
@@ -980,6 +1081,7 @@ int main(void) {
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   App_Init();
+  StartupSound_Play();
   /* USER CODE END 2 */
 
   /* Infinite loop */
