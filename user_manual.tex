@@ -1,0 +1,86 @@
+\documentclass[fontset=fandol,11pt,a4paper]{ctexart}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=black
+}
+
+\setlist[itemize]{leftmargin=1.6em}
+\setlist[enumerate]{leftmargin=1.8em}
+
+\title{\textbf{RM Armor Toy 使用说明书}}
+\author{版本：v1.1\\作者：tz61@illinois.edu / tzhang736@gatech.edu}
+\date{时间：2025/05/31}
+
+\begin{document}
+\maketitle
+
+\section*{快速开始}
+
+这是一块带灯效、蜂鸣器和久坐提醒功能的小板。正常使用时，可以用电池供电，也可以直接接 USB 供电。
+
+\begin{itemize}
+  \item \textbf{开机：}短按 \textbf{Power} 键。
+  \item \textbf{关机：}长按 \textbf{Power} 键约 10 秒。
+  \item \textbf{切换模式：}按 \textbf{Mode} 键。切到第几个模式，蜂鸣器就会响几声。
+  \item \textbf{敲击/轻弹：}轻敲外壳可以触发部分模式的互动效果；在久坐提醒模式下，轻敲会短暂显示进度。
+\end{itemize}
+
+\section*{四种模式}
+
+\begin{enumerate}
+  \item \textbf{动态彩虹模式}\\
+  灯效会自动循环，包括流动彩虹、扫描、发射、闪烁和呼吸等效果。
+
+  \item \textbf{红色常亮模式}\\
+  所有灯显示红色。可用 \textbf{ResetCnt} 键调节亮度。
+
+  \item \textbf{蓝色互动模式}\\
+  所有灯显示蓝色。轻敲时，灯会在蓝色和熄灭之间快速闪烁。可用 \textbf{ResetCnt} 键调节亮度。
+
+  \item \textbf{久坐提醒模式}\\
+  每 48 分钟为一轮。平时为了省电，进度灯不会一直亮；轻敲外壳后，进度条会显示约 2 秒，然后自动熄灭。
+
+  进度条由 16 颗灯组成，每颗灯代表 3 分钟。不同灯使用不同颜色，方便隔着灯罩判断进度。48 分钟到达后，蜂鸣器会发出提醒音；如果没有按 \textbf{ResetCnt} 复位，它会隔几秒再次提醒。
+\end{enumerate}
+
+\section*{亮度调节}
+
+在模式 1、2、3 中，按 \textbf{ResetCnt} 可以循环调节亮度：
+
+\[
+1 \rightarrow 2 \rightarrow 4 \rightarrow 8 \rightarrow 16 \rightarrow 32
+\rightarrow 64 \rightarrow 128 \rightarrow 256 \rightarrow 1
+\]
+
+默认亮度为 32。亮度越高，灯越亮，也越容易发热。
+
+\section*{充电与续航}
+
+\begin{itemize}
+  \item 充电时，建议尽量切到 \textbf{模式 4：久坐提醒模式}，因为平时亮的灯少，更省电也更不容易发热。
+  \item 电池大约可以维持久坐提醒模式 3 轮左右。长时间使用久坐提醒时，建议插着 USB 供电。
+  \item 这块板不装电池也可以工作。拧开外壳后，把电池插头拔掉，再接 USB 供电即可使用。
+\end{itemize}
+
+\section*{发热提醒}
+
+请不要长时间保持最高亮度。最高亮度下灯珠会比较烫手，尤其是放在外壳或灯罩里时更明显。
+
+这种发热一般不会伤害电路本身，但为了握持舒适和延长电池使用时间，建议日常使用中选择中低亮度。
+
+\section*{日常建议}
+
+\begin{itemize}
+  \item 想看灯效时，用模式 1。
+  \item 想保持简单颜色时，用模式 2 或模式 3。
+  \item 想当作桌面久坐提醒器时，用模式 4，并尽量插着 USB 使用。
+  \item 如果要收纳或长时间不用，请长按 \textbf{Power} 约 10 秒关机。
+\end{itemize}
+
+\end{document}

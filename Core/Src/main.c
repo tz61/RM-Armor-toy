@@ -98,6 +98,8 @@ static void MX_SPI1_Init(void);
   (SK6812_RESET_BYTES + SK6812_DATA_BYTES + SK6812_RESET_BYTES)
 
 #define APP_MODE_COUNT 4U
+#define ADJUSTABLE_LUMINANCE_LEVEL_COUNT 9U
+#define ADJUSTABLE_LUMINANCE_DEFAULT_INDEX 5U
 #define KEY_DEBOUNCE_MS 180U
 #define HIT_DEBOUNCE_MS 70U
 
@@ -141,6 +143,7 @@ static void MX_SPI1_Init(void);
 #define SEDENTARY_LED_SECONDS (SEDENTARY_TOTAL_SECONDS / SK6812_LED_COUNT)
 #define SEDENTARY_PROGRESS_SHOW_MS 2000UL
 #define SEDENTARY_DONE_BEEPS 5U
+#define SEDENTARY_REMINDER_BEEP_INTERVAL_MS 5000UL
 #define RTC_WAKEUP_COUNTER_1HZ 0U
 
 typedef enum {
@@ -172,6 +175,7 @@ static uint32_t last_hit_irq_ms = 0U;
 
 static AppMode app_mode = APP_MODE_FANCY;
 static BuzzerState buzzer = {0U, 0U, 0U};
+static uint8_t adjustable_luminance_index = ADJUSTABLE_LUMINANCE_DEFAULT_INDEX;
 static uint32_t next_led_update_ms = 0U;
 static uint32_t mode3_phase = 0U;
 static uint32_t tap_effect_started_ms = 0U;
@@ -179,6 +183,7 @@ static uint8_t tap_effect_active = 0U;
 static uint32_t sedentary_seconds = 0U;
 static uint8_t sedentary_reminder_active = 0U;
 static uint32_t sedentary_progress_until_ms = 0U;
+static uint32_t sedentary_next_beep_ms = 0U;
 
 static uint8_t TimeReached(uint32_t now, uint32_t target) {
   return ((int32_t)(now - target) >= 0) ? 1U : 0U;
@@ -195,6 +200,40 @@ static uint8_t ClampLed(uint8_t value) {
 static uint8_t ClampAddLed(uint8_t value, uint8_t add) {
   uint16_t sum = (uint16_t)value + (uint16_t)add;
   return (sum > active_led_solid_level) ? active_led_solid_level : (uint8_t)sum;
+}
+
+static uint8_t LuminanceToSolidLevel(uint16_t luminance) {
+  if (luminance >= 256U) {
+    return 255U;
+  }
+
+  return (uint8_t)luminance;
+}
+
+static uint8_t AdjustableLuminanceSolidLevel(void) {
+  return LuminanceToSolidLevel((uint16_t)(1U << adjustable_luminance_index));
+}
+
+static void App_UpdateActiveLedLimit(void) {
+  if (app_mode == APP_MODE_SEDENTARY) {
+    active_led_solid_level = MODE4_LED_SOLID_LEVEL;
+  } else if ((app_mode == APP_MODE_FANCY) || (app_mode == APP_MODE_RED) ||
+             (app_mode == APP_MODE_BLUE)) {
+    active_led_solid_level = AdjustableLuminanceSolidLevel();
+  } else {
+    active_led_solid_level = LED_SOLID_LEVEL;
+  }
+}
+
+static void App_CycleAdjustableLuminance(void) {
+  adjustable_luminance_index++;
+
+  if (adjustable_luminance_index >= ADJUSTABLE_LUMINANCE_LEVEL_COUNT) {
+    adjustable_luminance_index = 0U;
+  }
+
+  App_UpdateActiveLedLimit();
+  next_led_update_ms = 0U;
 }
 
 static uint8_t TakeRequest(volatile uint8_t *request) {
@@ -291,6 +330,10 @@ static void Buzzer_Task(uint32_t now) {
     buzzer.beeps_left--;
     buzzer.next_change_ms = now + BUZZER_BEEP_ON_MS;
   }
+}
+
+static uint8_t Buzzer_IsIdle(void) {
+  return ((buzzer.beeps_left == 0U) && (buzzer.output_on == 0U)) ? 1U : 0U;
 }
 
 static void StartupSound_Play(void) {
@@ -460,7 +503,7 @@ static void ColorWheelMax(uint8_t pos, uint8_t max_level, uint8_t *r,
 }
 
 static void ColorWheel(uint8_t pos, uint8_t *r, uint8_t *g, uint8_t *b) {
-  ColorWheelMax(pos, LED_SOLID_LEVEL, r, g, b);
+  ColorWheelMax(pos, active_led_solid_level, r, g, b);
 }
 
 static uint8_t BreathLevel(uint32_t now, uint8_t max_level) {
@@ -945,14 +988,25 @@ static void Sedentary_Reset(void) {
   sedentary_seconds = 0U;
   sedentary_reminder_active = 0U;
   sedentary_progress_until_ms = 0U;
+  sedentary_next_beep_ms = 0U;
   next_led_update_ms = 0U;
+}
+
+static void Sedentary_ReminderBeepTask(uint32_t now) {
+  if ((app_mode != APP_MODE_SEDENTARY) || (sedentary_reminder_active == 0U)) {
+    return;
+  }
+
+  if (TimeReached(now, sedentary_next_beep_ms) && Buzzer_IsIdle()) {
+    Buzzer_RequestBeeps(SEDENTARY_DONE_BEEPS);
+    sedentary_next_beep_ms = now + SEDENTARY_REMINDER_BEEP_INTERVAL_MS;
+  }
 }
 
 static void App_SetMode(AppMode mode) {
   app_mode = mode;
   tap_effect_active = 0U;
-  active_led_solid_level =
-      (app_mode == APP_MODE_SEDENTARY) ? MODE4_LED_SOLID_LEVEL : LED_SOLID_LEVEL;
+  App_UpdateActiveLedLimit();
   next_led_update_ms = 0U;
 
   if (app_mode == APP_MODE_SEDENTARY) {
@@ -989,6 +1043,9 @@ static void App_HandleEvents(uint32_t now) {
       if (was_reminding) {
         Buzzer_Cancel();
       }
+    } else if ((app_mode == APP_MODE_FANCY) || (app_mode == APP_MODE_RED) ||
+               (app_mode == APP_MODE_BLUE)) {
+      App_CycleAdjustableLuminance();
     }
   }
 
@@ -1010,12 +1067,14 @@ static void App_HandleEvents(uint32_t now) {
     if (sedentary_seconds + ticks >= SEDENTARY_TOTAL_SECONDS) {
       sedentary_seconds = SEDENTARY_TOTAL_SECONDS;
       sedentary_reminder_active = 1U;
+      sedentary_next_beep_ms = now;
       next_led_update_ms = 0U;
-      Buzzer_RequestBeeps(SEDENTARY_DONE_BEEPS);
     } else {
       sedentary_seconds += ticks;
     }
   }
+
+  Sedentary_ReminderBeepTask(now);
 }
 
 static void App_Render(uint32_t now) {
@@ -1040,6 +1099,7 @@ static void App_Render(uint32_t now) {
 
 static void App_Init(void) {
   Buzzer_Cancel();
+  App_UpdateActiveLedLimit();
   RenderModeFancy();
   SK6812_Show();
 }
